@@ -16,8 +16,8 @@ SPEC = DualSystemModelSpec(
     denoising_steps=25,
     notes={
         "system2_vision_encoder": "OpenHelix: LLaVA vision tower plus mm projector/connector when present, including patch/image embedding.",
-        "system2_inference": "OpenHelix: LLaVA LLM transformer from prepared multimodal embeddings to final-layer <ACT> hidden embedding. Text token embedding is outside this stage when prepared before transformer input.",
-        "system_bridge": "OpenHelix: <ACT> hidden embedding to low-level latent goal, including linear projector such as 4096->512 and condition formatting.",
+        "system2_inference": "OpenHelix: LLaVA LLM transformer from prepared multimodal embeddings to final-layer <ACT> latent, including text_hidden_fcs projection. Text token embedding is outside this stage when prepared before transformer input.",
+        "system_bridge": "OpenHelix: <ACT> latent condition formatting for the low-level policy.",
         "system1_vision_encoder": "OpenHelix: low-level 3DDA RGB-D/point-cloud/scene encoder that produces scene tokens.",
         "system1_action_expert": "OpenHelix: noisy trajectory initialization, proprio encoder, diffusion timestep embedding, 3DDA transformer/trajectory decoder and final scheduler update; excludes unnormalization/postprocessing.",
     },
