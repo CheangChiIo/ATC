@@ -93,7 +93,7 @@ class HumeRealAdapter:
             "system2_base_denoising_steps": s2_base_steps,
             "system2_candidate_count": int(self.policy.infer_cfg.s2_candidates_num),
             "system2_effective_steps_note": "Hume System-2 samples several candidate action chunks; each candidate uses model.config.num_steps as the base flow-matching grid, but the effective loop count also depends on time_temp and theta2.",
-            "stage_split_note": "Hume is measured through explicit staged boundaries: image resize/normalization/tokenization are data processing; S2 vision is SigLIP/PaliGemma image embedding; S2 inference reuses those visual tokens for candidate generation and value-query scoring; S1 vision is DINOv2 image embedding.",
+            "stage_split_note": "Hume is measured through explicit staged boundaries: image resize/normalization/tokenization are data processing; S2 vision is SigLIP/PaliGemma image embedding including the visual projection path when present; S2 inference reuses those visual tokens for candidate generation and value-query scoring; S1 vision is DINOv2 image embedding including projector/adapter/resampler when present.",
         }
 
     def _image(self, value: Any, fallback_shape: tuple[int, int, int]) -> np.ndarray:
@@ -409,9 +409,11 @@ class HumeRealAdapter:
             prefix_att_masks=system1_visual["prefix_att_masks"],
         )
         original_action_dim = int(self.policy.config.action_feature.shape[0])
-        actions = actions[:, :, :original_action_dim]
-        actions = self.policy.unnormalize_outputs({"action": actions})["action"]
-        return actions
+        return actions[:, :, :original_action_dim]
+
+    @torch.inference_mode()
+    def postprocess_actions(self, actions: torch.Tensor) -> torch.Tensor:
+        return self.policy.unnormalize_outputs({"action": actions})["action"]
 
     @torch.inference_mode()
     def infer(self, observation: dict[str, Any]) -> torch.Tensor:
@@ -420,7 +422,8 @@ class HumeRealAdapter:
         system2 = self.run_system2_inference(inputs, visual)
         bridge = self.run_system_bridge(inputs, system2)
         system1_visual = self.run_system1_vision_encoder(inputs)
-        return self.run_system1_action_expert(inputs, bridge, system1_visual)
+        actions = self.run_system1_action_expert(inputs, bridge, system1_visual)
+        return self.postprocess_actions(actions)
 
 
 def load_adapter(model_id=None, checkpoint_dir=None, train_config=None, device="cuda", dtype=torch.float32, spec=None, args=None):

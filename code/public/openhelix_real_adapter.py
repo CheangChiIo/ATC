@@ -426,6 +426,10 @@ class OpenHelixRealAdapter:
             cond_mask,
             system1_visual["fixed_inputs"],
         )
+        return trajectory
+
+    @torch.inference_mode()
+    def postprocess_trajectory(self, trajectory: torch.Tensor) -> torch.Tensor:
         if self.policy._rotation_parametrization != "6D":
             from diffuser_actor.utils.utils import normalise_quat
 
@@ -443,7 +447,8 @@ class OpenHelixRealAdapter:
         system2 = self.run_system2_inference(inputs, visual)
         bridge = self.run_system_bridge(inputs, system2)
         system1_visual = self.run_system1_vision_encoder(inputs)
-        return self.run_system1_action_expert(inputs, bridge, system1_visual)
+        trajectory = self.run_system1_action_expert(inputs, bridge, system1_visual)
+        return self.postprocess_trajectory(trajectory)
 
 
 def load_adapter(model_id=None, checkpoint_dir=None, train_config=None, device="cuda", dtype=torch.float32, spec=None, args=None):
