@@ -883,7 +883,7 @@ def make_stage_notes(spec: DualSystemModelSpec) -> dict[str, str]:
         "system2_vision_encoder": "System-2 image tensor to visual/projected tokens; includes image patch/embedding and visual projection when present.",
         "system2_inference": f"System-2 transformer/VLM/VLA starts and ends when {spec.system2_output_name} is fully available. Text token embedding is not included when the adapter follows the original benchmark's transformer-input boundary.",
         "system_bridge": f"{spec.bridge_name}: System-2 output to System-1 condition tensor/latent/action-condition ready.",
-        "system1_vision_encoder": "System-1 observation image/RGB-D/scene input to System-1 visual/sensory/scene tokens.",
+        "system1_vision_encoder": "System-1 observation image/RGB-D/scene input to System-1 visual/sensory/scene tokens; includes projector/adapter/resampler when present in the visual encoding path.",
         "system1_action_expert": "Starts before noisy action/trajectory initialization; includes state/proprio encoder, timestep/action embedding, iterative denoising, output projection/decoder and final scheduler/Euler update. Dataset-stat unnormalization and robot API postprocessing are excluded from this component.",
         "e2e": "Full public inference path, including data processing and public postprocessing when present.",
     }
