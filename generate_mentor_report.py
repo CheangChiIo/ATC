@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import csv
 import html
-import json
 import math
-import os
 import sqlite3
 from pathlib import Path
 from typing import Any
 
+try:
+    from report_schema_adapter import BenchmarkSchemaAdapter
+except ImportError:  # pragma: no cover - supports importing as tools.generate_mentor_report
+    from tools.report_schema_adapter import BenchmarkSchemaAdapter
 
 ROOT = Path("/home/dell/ATC")
 LATENCY_DIR = ROOT / "results/local_rerun_20260518_124717"
@@ -26,29 +28,8 @@ MODEL_LABELS = {
 
 MODEL_ORDER = ["SmolVLA", "pi0.5", "OpenVLA", "OpenHelix", "Hume", "RoboDual"]
 
-
-def load_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-
 def model_label(raw: str) -> str:
     return MODEL_LABELS.get(raw, raw)
-
-
-def metric_mean(stage_metrics: dict[str, Any], key: str) -> float | None:
-    value = stage_metrics.get(key)
-    if isinstance(value, dict):
-        mean = value.get("mean")
-        return float(mean) if mean is not None else None
-    if isinstance(value, (int, float)):
-        return float(value)
-    return None
-
-
-def stat_value(stats: dict[str, Any], key: str) -> float | None:
-    value = stats.get(key)
-    return float(value) if value is not None else None
 
 
 def fmt(value: float | None, digits: int = 1) -> str:
@@ -192,22 +173,19 @@ def collect_latency() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     summary: list[dict[str, Any]] = []
     components: list[dict[str, Any]] = []
     for path in sorted(LATENCY_DIR.glob("*_latency.json")):
-        payload = load_json(path)
-        model = model_label(payload["model"])
-        e2e = payload["latency_ms"]["e2e"]
-        mean = stat_value(e2e, "mean")
-        throughput = payload.get("frequency_hz", {}).get("e2e_mean")
-        if throughput is None and mean:
-            throughput = 1000.0 / mean
-        benchmark = payload.get("benchmark", {})
+        adapter = BenchmarkSchemaAdapter.from_file(path)
+        model = model_label(adapter.model)
+        mean = adapter.latency_stat("e2e", "mean")
+        throughput = adapter.throughput_hz()
+        benchmark = adapter.benchmark
         row = {
             "model": model,
             "source_file": str(path),
             "e2e_mean_ms": mean,
-            "e2e_p5_ms": stat_value(e2e, "p5"),
-            "e2e_p95_ms": stat_value(e2e, "p95"),
-            "e2e_std_ms": stat_value(e2e, "std"),
-            "n": e2e.get("n"),
+            "e2e_p5_ms": adapter.latency_stat("e2e", "p5"),
+            "e2e_p95_ms": adapter.latency_stat("e2e", "p95"),
+            "e2e_std_ms": adapter.latency_stat("e2e", "std"),
+            "n": adapter.latency_n("e2e"),
             "throughput_hz": float(throughput) if throughput is not None else None,
             "example_source": benchmark.get("example_source"),
             "default_iterations": benchmark.get("e2e_iterations") or benchmark.get("default_measured_iterations"),
@@ -215,22 +193,17 @@ def collect_latency() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         }
         summary.append(row)
 
-        labels = payload.get("plot_stage_labels", {})
-        order = payload.get("plot_stage_order") or list(payload["latency_ms"].keys())
-        for stage in order:
-            if stage not in payload["latency_ms"]:
-                continue
-            stats = payload["latency_ms"][stage]
+        for stage in adapter.latency_stage_order():
             components.append(
                 {
                     "model": model,
                     "stage": stage,
-                    "stage_label": labels.get(stage, stage),
-                    "mean_ms": stat_value(stats, "mean"),
-                    "p5_ms": stat_value(stats, "p5"),
-                    "p95_ms": stat_value(stats, "p95"),
-                    "std_ms": stat_value(stats, "std"),
-                    "n": stats.get("n"),
+                    "stage_label": adapter.stage_label(stage),
+                    "mean_ms": adapter.latency_stat(stage, "mean"),
+                    "p5_ms": adapter.latency_stat(stage, "p5"),
+                    "p95_ms": adapter.latency_stat(stage, "p95"),
+                    "std_ms": adapter.latency_stat(stage, "std"),
+                    "n": adapter.latency_n(stage),
                 }
             )
     return sort_models(summary), sort_models(components)
@@ -241,10 +214,9 @@ def collect_resource() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list
     components: list[dict[str, Any]] = []
     integrity: list[dict[str, Any]] = []
     for path in sorted(RESOURCE_DIR.glob("*_resource.json")):
-        payload = load_json(path)
-        model = model_label(payload["model"])
-        e2e = payload["resource_metrics"]["e2e"]
-        nsight = payload.get("benchmark", {}).get("nsight", {})
+        adapter = BenchmarkSchemaAdapter.from_file(path)
+        model = model_label(adapter.model)
+        nsight = adapter.nsight
         report_file = Path(nsight.get("expected_report_file", ""))
         sqlite_file = Path(nsight.get("sqlite_export_file", ""))
         report_size_mb = report_file.stat().st_size / 1024**2 if report_file.exists() else None
@@ -262,18 +234,18 @@ def collect_resource() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list
             {
                 "model": model,
                 "source_file": str(path),
-                "gpu_profile_duration_mean_ms": metric_mean(e2e, "gpu_profile_duration_ms"),
-                "cpu_pytorch_duration_mean_ms": metric_mean(e2e, "duration_ms"),
-                "gpu_busy_mean_percent": metric_mean(e2e, "gpu_busy_ratio_percent_mean"),
-                "gpu_busy_p95_percent": e2e.get("gpu_busy_ratio_percent_mean", {}).get("p95"),
-                "sm_mean_percent": metric_mean(e2e, "sm_util_percent_mean"),
-                "sm_p95_percent": e2e.get("sm_util_percent_mean", {}).get("p95"),
-                "nsight_cuda_memory_peak_mb": metric_mean(e2e, "nsight_cuda_memory_peak_mb"),
-                "torch_allocated_peak_mb": metric_mean(e2e, "torch_memory_allocated_mb_peak"),
-                "torch_reserved_peak_mb": metric_mean(e2e, "torch_memory_reserved_mb_peak"),
-                "cpu_process_mean_percent": metric_mean(e2e, "cpu_process_percent_mean"),
-                "cpu_process_core_mean_percent": metric_mean(e2e, "cpu_process_core_percent_mean"),
-                "n": e2e.get("duration_ms", {}).get("n") or e2e.get("gpu_profile_duration_ms", {}).get("n"),
+                "gpu_profile_duration_mean_ms": adapter.resource_metric_mean("e2e", "gpu_profile_duration_ms"),
+                "cpu_pytorch_duration_mean_ms": adapter.resource_metric_mean("e2e", "duration_ms"),
+                "gpu_busy_mean_percent": adapter.resource_metric_mean("e2e", "gpu_busy_ratio_percent_mean"),
+                "gpu_busy_p95_percent": adapter.resource_metric_stat("e2e", "gpu_busy_ratio_percent_mean", "p95"),
+                "sm_mean_percent": adapter.resource_metric_mean("e2e", "sm_util_percent_mean"),
+                "sm_p95_percent": adapter.resource_metric_stat("e2e", "sm_util_percent_mean", "p95"),
+                "nsight_cuda_memory_peak_mb": adapter.resource_metric_mean("e2e", "nsight_cuda_memory_peak_mb"),
+                "torch_allocated_peak_mb": adapter.resource_metric_mean("e2e", "torch_memory_allocated_mb_peak"),
+                "torch_reserved_peak_mb": adapter.resource_metric_mean("e2e", "torch_memory_reserved_mb_peak"),
+                "cpu_process_mean_percent": adapter.resource_metric_mean("e2e", "cpu_process_percent_mean"),
+                "cpu_process_core_mean_percent": adapter.resource_metric_mean("e2e", "cpu_process_core_percent_mean"),
+                "n": adapter.resource_n("e2e", "duration_ms", "gpu_profile_duration_ms"),
                 "nsys_rep_size_mb": report_size_mb,
                 "sqlite_size_mb": sqlite_size_mb,
                 "gpu_metrics_rows": gpu_rows,
@@ -293,24 +265,19 @@ def collect_resource() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list
             }
         )
 
-        labels = payload.get("plot_stage_labels", {})
-        order = payload.get("plot_stage_order") or list(payload["resource_metrics"].keys())
-        for stage in order:
-            if stage not in payload["resource_metrics"]:
-                continue
-            metrics = payload["resource_metrics"][stage]
+        for stage in adapter.resource_stage_order():
             components.append(
                 {
                     "model": model,
                     "stage": stage,
-                    "stage_label": labels.get(stage, stage),
-                    "duration_mean_ms": metric_mean(metrics, "duration_ms"),
-                    "gpu_profile_duration_mean_ms": metric_mean(metrics, "gpu_profile_duration_ms"),
-                    "gpu_busy_mean_percent": metric_mean(metrics, "gpu_busy_ratio_percent_mean"),
-                    "sm_mean_percent": metric_mean(metrics, "sm_util_percent_mean"),
-                    "nsight_cuda_memory_peak_mb": metric_mean(metrics, "nsight_cuda_memory_peak_mb"),
-                    "torch_allocated_peak_mb": metric_mean(metrics, "torch_memory_allocated_mb_peak"),
-                    "cpu_process_mean_percent": metric_mean(metrics, "cpu_process_percent_mean"),
+                    "stage_label": adapter.stage_label(stage),
+                    "duration_mean_ms": adapter.resource_metric_mean(stage, "duration_ms"),
+                    "gpu_profile_duration_mean_ms": adapter.resource_metric_mean(stage, "gpu_profile_duration_ms"),
+                    "gpu_busy_mean_percent": adapter.resource_metric_mean(stage, "gpu_busy_ratio_percent_mean"),
+                    "sm_mean_percent": adapter.resource_metric_mean(stage, "sm_util_percent_mean"),
+                    "nsight_cuda_memory_peak_mb": adapter.resource_metric_mean(stage, "nsight_cuda_memory_peak_mb"),
+                    "torch_allocated_peak_mb": adapter.resource_metric_mean(stage, "torch_memory_allocated_mb_peak"),
+                    "cpu_process_mean_percent": adapter.resource_metric_mean(stage, "cpu_process_percent_mean"),
                 }
             )
     return sort_models(summary), sort_models(components), sort_models(integrity)
@@ -659,6 +626,216 @@ def resource_report_text(
 """
 
 
+def _rows_for_model(rows: list[dict[str, Any]], model: str) -> list[dict[str, Any]]:
+    return [row for row in rows if row["model"] == model]
+
+
+def _summary_by_model(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {row["model"]: row for row in rows}
+
+
+def _non_e2e_stage_rows(rows: list[dict[str, Any]], value_key: str) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in rows
+        if row["stage"] not in {"e2e", "data_processing"} and row.get(value_key) is not None
+    ]
+
+
+def stage_breakdown_report_text(
+    latency_summary: list[dict[str, Any]],
+    latency_components: list[dict[str, Any]],
+    resource_summary: list[dict[str, Any]],
+    resource_components: list[dict[str, Any]],
+) -> str:
+    lat_summary = _summary_by_model(latency_summary)
+    res_summary = _summary_by_model(resource_summary)
+    models = [model for model in MODEL_ORDER if model in lat_summary or model in res_summary]
+
+    top_latency = sorted(
+        _non_e2e_stage_rows(latency_components, "mean_ms"),
+        key=lambda row: row["mean_ms"],
+        reverse=True,
+    )[:12]
+    top_resource_duration = sorted(
+        _non_e2e_stage_rows(resource_components, "duration_mean_ms"),
+        key=lambda row: row["duration_mean_ms"],
+        reverse=True,
+    )[:12]
+    top_resource_sm = sorted(
+        _non_e2e_stage_rows(resource_components, "sm_mean_percent"),
+        key=lambda row: row["sm_mean_percent"],
+        reverse=True,
+    )[:12]
+
+    top_latency_table = markdown_table(
+        ["Rank", "Model", "Stage", "Mean (ms)", "P5-P95 (ms)", "% of E2E"],
+        [
+            [
+                str(idx + 1),
+                row["model"],
+                row["stage_label"],
+                fmt(row["mean_ms"], 1),
+                f'{fmt(row["p5_ms"], 1)}-{fmt(row["p95_ms"], 1)}',
+                fmt(row["mean_ms"] / lat_summary[row["model"]]["e2e_mean_ms"] * 100, 1),
+            ]
+            for idx, row in enumerate(top_latency)
+        ],
+    )
+    top_resource_duration_table = markdown_table(
+        ["Rank", "Model", "Stage", "Duration (ms)", "GPU busy (%)", "SM mean (%)", "% of resource E2E"],
+        [
+            [
+                str(idx + 1),
+                row["model"],
+                row["stage_label"],
+                fmt(row["duration_mean_ms"], 1),
+                fmt(row["gpu_busy_mean_percent"], 1),
+                fmt(row["sm_mean_percent"], 1),
+                fmt(
+                    row["duration_mean_ms"]
+                    / res_summary[row["model"]]["cpu_pytorch_duration_mean_ms"]
+                    * 100,
+                    1,
+                ),
+            ]
+            for idx, row in enumerate(top_resource_duration)
+        ],
+    )
+    top_resource_sm_table = markdown_table(
+        ["Rank", "Model", "Stage", "SM mean (%)", "GPU busy (%)", "Duration (ms)"],
+        [
+            [
+                str(idx + 1),
+                row["model"],
+                row["stage_label"],
+                fmt(row["sm_mean_percent"], 1),
+                fmt(row["gpu_busy_mean_percent"], 1),
+                fmt(row["duration_mean_ms"], 1),
+            ]
+            for idx, row in enumerate(top_resource_sm)
+        ],
+    )
+
+    sections = [
+        "# Latency 与资源占用分阶段报告",
+        "",
+        "## 阅读说明",
+        "",
+        "- 本报告按模型展开，列出每个阶段的 latency 和 resource 指标。",
+        "- Latency 阶段耗时来自 `*_latency.json`，是正式速度测量结果。",
+        "- Resource 阶段指标来自 `*_resource.json`，其中 GPU 指标来自 Nsight pass，CPU/PyTorch 显存来自后两轮非 Nsight pass。",
+        "- 阶段耗时与 E2E 是分开测的，百分比只用于定位瓶颈，不应强行相加成 E2E。",
+        "",
+        "## 全局阶段瓶颈 Top 表",
+        "",
+        "### Latency 最耗时阶段",
+        "",
+        top_latency_table,
+        "",
+        "### Resource 最长阶段",
+        "",
+        top_resource_duration_table,
+        "",
+        "### SM 利用率最高阶段",
+        "",
+        top_resource_sm_table,
+        "",
+        "## 按模型分阶段明细",
+        "",
+    ]
+
+    for model in models:
+        lat_e2e = lat_summary.get(model, {})
+        res_e2e = res_summary.get(model, {})
+        lat_rows = []
+        for row in _rows_for_model(latency_components, model):
+            pct = None
+            if row.get("mean_ms") is not None and lat_e2e.get("e2e_mean_ms"):
+                pct = row["mean_ms"] / lat_e2e["e2e_mean_ms"] * 100
+            lat_rows.append(
+                [
+                    row["stage_label"],
+                    fmt(row.get("mean_ms"), 1),
+                    f'{fmt(row.get("p5_ms"), 1)}-{fmt(row.get("p95_ms"), 1)}',
+                    fmt(row.get("std_ms"), 2),
+                    fmt(pct, 1),
+                    str(row.get("n") or "-"),
+                ]
+            )
+        res_rows = []
+        for row in _rows_for_model(resource_components, model):
+            pct = None
+            if row.get("duration_mean_ms") is not None and res_e2e.get("cpu_pytorch_duration_mean_ms"):
+                pct = row["duration_mean_ms"] / res_e2e["cpu_pytorch_duration_mean_ms"] * 100
+            res_rows.append(
+                [
+                    row["stage_label"],
+                    fmt(row.get("duration_mean_ms"), 1),
+                    fmt(pct, 1),
+                    fmt(row.get("gpu_busy_mean_percent"), 1),
+                    fmt(row.get("sm_mean_percent"), 1),
+                    fmt(row["nsight_cuda_memory_peak_mb"] / 1024 if row.get("nsight_cuda_memory_peak_mb") else None, 2),
+                    fmt(row["torch_allocated_peak_mb"] / 1024 if row.get("torch_allocated_peak_mb") else None, 2),
+                    fmt(row.get("cpu_process_mean_percent"), 1),
+                ]
+            )
+
+        lat_stage = dominant_stage(latency_components, model, "mean_ms") if model in lat_summary else None
+        res_stage = dominant_stage(resource_components, model, "duration_mean_ms") if model in res_summary else None
+        headline = []
+        if lat_stage:
+            headline.append(f"Latency 主瓶颈：**{lat_stage['stage_label']}**（{fmt(lat_stage['mean_ms'], 1)} ms）")
+        if res_stage:
+            headline.append(
+                f"资源最长阶段：**{res_stage['stage_label']}**（{fmt(res_stage['duration_mean_ms'], 1)} ms，SM {fmt(res_stage['sm_mean_percent'], 1)}%）"
+            )
+
+        sections.extend(
+            [
+                f"### {model}",
+                "",
+                "；".join(headline) + "。",
+                "",
+                "**Latency 分阶段**",
+                "",
+                markdown_table(
+                    ["Stage", "Mean (ms)", "P5-P95 (ms)", "Std (ms)", "% of E2E", "n"],
+                    lat_rows,
+                ),
+                "",
+                "**Resource 分阶段**",
+                "",
+                markdown_table(
+                    [
+                        "Stage",
+                        "Duration (ms)",
+                        "% of resource E2E",
+                        "GPU busy (%)",
+                        "SM mean (%)",
+                        "CUDA peak (GB)",
+                        "Torch alloc peak (GB)",
+                        "CPU mean (%)",
+                    ],
+                    res_rows,
+                ),
+                "",
+            ]
+        )
+
+    sections.extend(
+        [
+            "## 汇报时可直接说的结论",
+            "",
+            "- 单系统模型中，SmolVLA、pi0.5、OpenVLA 的主耗时基本都落在 Action Expert；OpenVLA 的该阶段 GPU busy 和 SM 利用率更高。",
+            "- 双系统模型中，Hume 和 RoboDual 的主瓶颈是 System2 Inference；RoboDual 该阶段同时具有最高的 SM 利用率和最长 duration。",
+            "- OpenHelix 的瓶颈更偏 System1 Action Expert，而不是 System2 Inference。",
+            "- 显存峰值在阶段间变化不大时，说明主要由模型常驻参数/缓存决定；阶段表里的显存更适合作为该窗口内峰值，而不是阶段独占显存。",
+        ]
+    )
+    return "\n".join(sections) + "\n"
+
+
 def html_report(markdown: str) -> str:
     escaped = html.escape(markdown)
     # Keep the HTML dependency-free. Markdown source is embedded verbatim, while
@@ -836,6 +1013,15 @@ def main() -> None:
     (OUT_DIR / "latency_report.md").write_text(latency_report_text(latency_summary, latency_components), encoding="utf-8")
     (OUT_DIR / "resource_report.md").write_text(
         resource_report_text(resource_summary, resource_components, integrity),
+        encoding="utf-8",
+    )
+    (OUT_DIR / "stage_breakdown_report.md").write_text(
+        stage_breakdown_report_text(
+            latency_summary,
+            latency_components,
+            resource_summary,
+            resource_components,
+        ),
         encoding="utf-8",
     )
     print(OUT_DIR)
