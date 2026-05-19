@@ -16,7 +16,7 @@ SPEC = DualSystemModelSpec(
         "system2_vision_encoder": "Hume: System-2 SigLIP/PaliGemma image tower plus multimodal projector, producing reusable visual tokens for the current observation.",
         "system2_inference": "Hume: language embedding, System-2 PaliGemma/Gemma prefix cache, flow/action candidate generation, value-query scoring and Best-of-N selection. Reuses the measured System-2 visual tokens.",
         "system_bridge": "Hume: selected long-horizon action chunk to System-1 sub-action condition / queue entry.",
-        "system1_vision_encoder": "Hume: DINOv2-small/current-image encoder path, including patch/image embedding.",
+        "system1_vision_encoder": "Hume: DINOv2-small/current-image encoder path, including patch/image embedding and projector/adapter/resampler when present.",
         "system1_action_expert": "Hume: current visual/state/sub-action condition to refined action chunk; includes noisy-action handling and all cascaded denoising updates, reusing measured System-1 visual tokens and excluding unnormalization/postprocessing.",
     },
 )
