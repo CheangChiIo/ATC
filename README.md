@@ -77,6 +77,164 @@ code/
 | RoboDual | RoboDual 仓库、OpenVLA generalist checkpoint、specialist checkpoint |
 | OpenHelix | OpenHelix 仓库、policy checkpoint、CLIP vision tower、`peft`、`dgl`、`diffuser_actor` 等 |
 
+## Docker 环境（推荐）
+
+如果不想手动配置各模型的环境依赖，可以使用预置的 Docker 镜像。
+每个镜像自带 CUDA devel 工具链、PyTorch、Nsight CLI 和对应模型的 Python 依赖。
+
+### 镜像与模型对应关系
+
+| 镜像 | 包含模型 | 基础镜像 |
+|------|---------|---------|
+| `atc-openvla:x86-cu128` | OpenVLA | `nvidia/cuda:12.8.0-devel-ubuntu22.04` |
+| `atc-pi05-smolvla:x86-cu128` | π0.5 + SmolVLA | `nvidia/cuda:12.8.0-devel-ubuntu22.04` |
+| `atc-hume-robodual:x86-cu128` | Hume + RoboDual | `nvidia/cuda:12.8.0-devel-ubuntu22.04` |
+| `atc-openhelix:x86-cu128` | OpenHelix | `nvidia/cuda:12.8.0-devel-ubuntu22.04` |
+
+Jetson Orin (ARM64) 使用独立镜像体系，基础镜像为 `nvcr.io/nvidia/l4t-pytorch`。
+
+### 构建镜像
+
+```bash
+# 克隆仓库后
+cd docker
+
+# ── x86 镜像（RTX 4090 / RTX 5090）──
+# 一键构建全部 4 个（需要良好网络，约 30-60 分钟）
+# build-all.sh 会自动检查 Docker 和 nvidia-container-toolkit 是否就绪，
+# 然后按 openvla → pi05-smolvla → hume-robodual → openhelix 顺序构建，
+# 最后打印 docker save 导出命令。
+./build-all.sh
+
+# 也可单独构建某个模型
+./build-all.sh openvla
+
+# 或手动逐个构建
+cd x86/openvla && docker build -t atc-openvla:x86-cu128 .
+cd x86/pi05-smolvla && docker build -t atc-pi05-smolvla:x86-cu128 .
+cd x86/hume-robodual && docker build -t atc-hume-robodual:x86-cu128 .
+cd x86/openhelix && docker build -t atc-openhelix:x86-cu128 .
+
+# ── Jetson ARM64 镜像 ──
+# 在 Jetson 设备上构建，或配置 QEMU 交叉编译
+L4T_TAG=r36.4.0-pth2.4.0 ./build-all.sh --jetson
+# 构建单个 Jetson 模型
+L4T_TAG=r36.4.0-pth2.4.0 ./build-all.sh --jetson openvla
+
+# ── 导出镜像用于分发 ──
+docker save atc-openvla:x86-cu128 | gzip > atc-openvla-x86-cu128.tar.gz
+# 目标机器加载
+docker load -i atc-openvla-x86-cu128.tar.gz
+```
+
+### 运行测试
+
+宿主机需安装 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。
+
+```bash
+# 准备数据目录（在当前工作目录下即可）
+mkdir -p checkpoints datasets results
+
+# 延迟测试
+docker run --rm --gpus all \
+  --pid=host --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+  --cap-add=SYS_ADMIN --security-opt seccomp=unconfined \
+  -v $(pwd)/checkpoints:/checkpoints \
+  -v $(pwd)/datasets:/datasets \
+  -v $(pwd)/results:/results \
+  atc-openvla:x86-cu128 \
+  openvla.py --model-id /checkpoints/openvla-checkpoint \
+    --num-iterations 100 --warmup 20 \
+    --output-json /results/openvla_latency.json
+
+# 资源测试（含完整 .nsys-rep）
+docker run --rm --gpus all \
+  --pid=host --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+  --cap-add=SYS_ADMIN --security-opt seccomp=unconfined \
+  -v $(pwd)/checkpoints:/checkpoints \
+  -v $(pwd)/datasets:/datasets \
+  -v $(pwd)/results:/results \
+  atc-openvla:x86-cu128 \
+  openvla_resource.py --model-id /checkpoints/openvla-checkpoint \
+    --num-iterations 100 --warmup 20 \
+    --output-json /results/openvla_resource.json
+```
+
+也可使用便捷脚本 `run.sh`。该脚本封装了 `docker run` 的参数细节，
+通过模型名映射到对应镜像和入口脚本：
+
+```bash
+# 用法：./run.sh <模型名> <测试类型> [额外参数]
+cd docker
+
+# 模型名：openvla | pi05 | smolvla | hume | robodual | openhelix
+# 测试类型：latency | resource
+
+./run.sh openvla latency --model-id /checkpoints/openvla-checkpoint
+./run.sh openvla resource --model-id /checkpoints/openvla-checkpoint
+./run.sh hume latency --model-loader public.hume_real_adapter:load_adapter \
+  --model-id /checkpoints/hume-checkpoint
+```
+
+### Jetson Orin 运行
+
+```bash
+# 在 Jetson 设备上构建（按需调整 L4T_TAG）
+cd docker/jetson
+docker build -f openvla.Dockerfile --build-arg L4T_TAG=r36.4.0-pth2.4.0 -t atc-openvla:jetson-l4t .
+
+# 运行（Jetson 使用 --runtime nvidia，不加 --gpus all）
+docker run --rm --runtime nvidia \
+  --network host --ipc=host \
+  -v $(pwd)/checkpoints:/checkpoints \
+  -v $(pwd)/datasets:/datasets \
+  -v $(pwd)/results:/results \
+  atc-openvla:jetson-l4t \
+  python openvla.py --model-id /checkpoints/openvla-checkpoint
+```
+
+### 容器内 Nsight 说明
+
+镜像内已安装 Nsight Systems CLI (`nsys`)，可直接在容器内调用：
+
+```bash
+# 手动 Nsight profile
+nsys profile --trace=cuda,nvtx,osrt python openvla.py --num-iterations 2 --warmup 1
+
+# 导出 SQLite 分析
+nsys export --type sqlite report.nsys-rep
+```
+
+运行容器时必须加上 `--pid=host --cap-add=SYS_ADMIN --security-opt seccomp=unconfined`，
+否则 GPU metrics / SM 利用率可能无法采集。
+
+完整 Nsight GPU 指标还需要满足以下条件：
+
+1. **容器以 root 运行**：默认满足（Docker 容器内 UID=0）。
+2. **宿主机 `perf_event_paranoid`**：必须 ≤ 1。检查 `cat /proc/sys/kernel/perf_event_paranoid`，
+   如果 ≥ 2，需在宿主机用 root 执行 `echo 1 > /proc/sys/kernel/perf_event_paranoid`。
+3. **NVIDIA 驱动 `RmProfilingAdminOnly`**：部分驱动默认设为 1，限制 profiler 权限。
+   如果 GPU metrics 始终为空，需检查 `nvidia-smi -q -d PERFORMANCE` 或在宿主机以 root 运行。
+
+### Dockerfile 目录结构
+
+```text
+docker/
+├── build-all.sh                    # 一键构建脚本
+├── run.sh                          # 便捷运行脚本
+├── x86/                            # x86_64 镜像 (RTX 4090/5090)
+│   ├── openvla/Dockerfile
+│   ├── pi05-smolvla/Dockerfile
+│   ├── hume-robodual/Dockerfile
+│   └── openhelix/Dockerfile
+├── jetson/                         # Jetson ARM64 模板
+│   ├── openvla.Dockerfile
+│   ├── pi05-smolvla.Dockerfile
+│   ├── hume-robodual.Dockerfile
+│   └── openhelix.Dockerfile
+└── shared/                         # 所有镜像共用的代码文件
+```
+
 ## 快速冒烟测试
 
 真实模型和数据集接好前，建议先用双系统 dummy adapter 验证测试框架能否跑通：
