@@ -50,9 +50,6 @@ code/
     └── plot_vla_json_records.py
 ```
 
-> 注意：当前 `warehouse/code` 下没有 `tools/` 目录。实验报告脚本位于 ATC 仓库根目录：
-> `../../tools/generate_mentor_report.py`。
-
 ## 环境要求
 
 | 依赖 | 说明 |
