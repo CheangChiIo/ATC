@@ -50,6 +50,9 @@ code/
     └── plot_vla_json_records.py
 ```
 
+> 注意：当前 `warehouse/code` 下没有 `tools/` 目录。实验报告脚本位于 ATC 仓库根目录：
+> `../../tools/generate_mentor_report.py`。
+
 ## 环境要求
 
 | 依赖 | 说明 |
@@ -118,10 +121,21 @@ L4T_TAG=r36.4.0-pth2.4.0 ./build-all.sh --jetson
 # 构建单个 Jetson 模型
 L4T_TAG=r36.4.0-pth2.4.0 ./build-all.sh --jetson openvla
 
-# ── 导出镜像用于分发 ──
-docker save atc-openvla:x86-cu128 | gzip > atc-openvla-x86-cu128.tar.gz
-# 目标机器加载
-docker load -i atc-openvla-x86-cu128.tar.gz
+# Export images for distribution
+# x86 example; use jetson instead of x86 for Jetson images.
+for model in openvla pi05-smolvla hume-robodual openhelix; do
+  docker save atc-${model}:x86-cu128 | gzip > atc-${model}-x86-cu128.tar.gz
+done
+
+# Jetson four-image export example.
+for model in openvla pi05-smolvla hume-robodual openhelix; do
+  docker save atc-${model}:jetson-cu128 | gzip > atc-${model}-jetson-cu128.tar.gz
+done
+
+# Load on target. On Jetson, run jetson/setup-jetson-portability.sh first.
+for tarball in atc-*-jetson-cu128.tar.gz; do
+  gzip -dc "$tarball" | docker load
+done
 ```
 
 ### 运行测试
@@ -457,10 +471,10 @@ GPU metrics 或 CPU 采样。需要使用有权限的 root/sudo 运行，或者�
 
 | 文件 | 默认路径/参数 |
 | --- | --- |
-| `latency/openvla.py` | `model_id=/home/dell/桌面/STJ/openvla-main/checkpoints/openvla-7b-finetuned-libero-spatial` |
-| `latency/pi05.py` | `checkpoint_dir=/home/dell/桌面/STJ/openpi/checkpoints/pi05_libero_pt` |
-| `latency/smolvla.py` | `model_id=/home/dell/ATC/checkpoints/smolvla_base` |
-| `latency/openvla.py`, `latency/pi05.py`, `latency/smolvla.py` | `DEFAULT_LIBERO_DATASET_ROOT=/home/dell/ATC/datasets/physical-intelligence/libero` |
+| `latency/openvla.py` | `model_id=/checkpoints/robodual-openvla-generalist` |
+| `latency/pi05.py` | `checkpoint_dir=/checkpoints/pi05_libero` |
+| `latency/smolvla.py` | `model_id=/checkpoints/smolvla_base` |
+| `latency/openvla.py`, `latency/pi05.py`, `latency/smolvla.py` | `DEFAULT_LIBERO_DATASET_ROOT=/datasets/physical-intelligence/libero` |
 | `latency/dual_system_benchmarking.py` | LIBERO/CALVIN 默认数据集路径 |
 
 对应的 resource 脚本通常继承 latency 脚本的配置。
@@ -469,9 +483,9 @@ GPU metrics 或 CPU 采样。需要使用有权限的 root/sudo 运行，或者�
 
 | 文件 | 路径含义 |
 | --- | --- |
-| `public/hume_real_adapter.py` | `HUME_REPO_SRC=/tmp/hume_repo_check/src`，`DEFAULT_HUME_CHECKPOINT=/home/dell/ATC/checkpoints/hume-libero-spatial-1` |
-| `public/robodual_real_adapter.py` | `ROBODUAL_REPO` 可用环境变量覆盖；`DEFAULT_GENERALIST=/home/dell/ATC/checkpoints/robodual-openvla-generalist`；specialist 默认在 RoboDual 仓库下 |
-| `public/openhelix_real_adapter.py` | `OPENHELIX_REPO` 可用环境变量覆盖；`DEFAULT_OPENHELIX_ROOT=/home/dell/ATC/checkpoints/openhelix/prompt_tuning_aux`；`DEFAULT_CLIP_ROOT=/home/dell/ATC/checkpoints/openhelix/clip-vit-large-patch14` |
+| `public/hume_real_adapter.py` | `HUME_REPO_SRC=/repos/hume_repo_check/src`，`DEFAULT_HUME_CHECKPOINT=/checkpoints/hume-libero-spatial-1` |
+| `public/robodual_real_adapter.py` | `ROBODUAL_REPO` 可用环境变量覆盖；`DEFAULT_GENERALIST=/checkpoints/robodual-openvla-generalist`；specialist 默认在 RoboDual 仓库下 |
+| `public/openhelix_real_adapter.py` | `OPENHELIX_REPO` 可用环境变量覆盖；`DEFAULT_OPENHELIX_ROOT=/checkpoints/openhelix/prompt_tuning_aux`；`DEFAULT_CLIP_ROOT=/checkpoints/openhelix/clip-vit-large-patch14` |
 
 示例：
 
@@ -597,3 +611,42 @@ python public/plot_vla_json_records.py results/*.json \
 
 该脚本读取 JSON 中的 `plot_records`，可混合读取单系统和双系统结果；需要
 `pandas` 与 `matplotlib`。
+
+## Jetson portability checklist
+
+Before building or loading images on a new Jetson, run the portability setup from this directory:
+
+```bash
+cd /path/to/ATC/docker
+bash jetson/setup-jetson-portability.sh --yes --move-host-caches --persist-nsight
+```
+
+What it does:
+
+- sets Docker `data-root` to the same filesystem as the ATC project, for example `/nvmeroot/docker` when the project is under `/nvmeroot/ATC`;
+- creates project-local runtime directories: `../.tmp`, `../hf_cache`, `../results`, `../checkpoints`, `../datasets`, `../external_repos`;
+- optionally moves host caches such as `/tmp/nvidia`, root pip cache, and user CLIP cache onto the ATC disk and leaves symlinks;
+- sets `kernel.perf_event_paranoid=1` for Nsight profiling, with `sudo` prompting for the Jetson user password.
+
+`run.sh` also enforces project-local runtime paths every time it launches a container. It mounts `../.tmp` as `/atc_tmp`, sets `TMPDIR/TMP/TEMP` inside the container to `/atc_tmp`, writes reports to `/results`, and points Hugging Face caches to `/hf_cache`. In `resource` mode it checks host Nsight permissions and prompts through `sudo` if `perf_event_paranoid` must be lowered.
+
+For a quick Jetson Nsight validation after loading/building images:
+
+```bash
+./run.sh smolvla resource \
+  --model-id /checkpoints/smolvla_base \
+  --example-source synthetic \
+  --num-iterations 1 --warmup 0 \
+  --data-processing-iterations 1 --data-processing-warmup 0 \
+  --e2e-iterations 1 --e2e-warmup 0 \
+  --component-iterations 1 --component-warmup 0 \
+  --resource-sampler-backend nsight \
+  --output-json /results/smolvla_resource_smoke.json
+```
+
+A successful run must leave these files under the host `../results` directory:
+
+- `*.nsys-rep`
+- `*.sqlite`
+- the requested JSON result file
+
